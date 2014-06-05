@@ -1,0 +1,155 @@
+K 25
+svn:wc:ra_dav:version-url
+V 31
+/svn/!svn/ver/30/trunk/Shell/SS
+END
+hybridCacheLock.sh
+K 25
+svn:wc:ra_dav:version-url
+V 50
+/svn/!svn/ver/30/trunk/Shell/SS/hybridCacheLock.sh
+END
+result.sh
+K 25
+svn:wc:ra_dav:version-url
+V 41
+/svn/!svn/ver/30/trunk/Shell/SS/result.sh
+END
+floatPoint.sh
+K 25
+svn:wc:ra_dav:version-url
+V 45
+/svn/!svn/ver/30/trunk/Shell/SS/floatPoint.sh
+END
+compilebat.sh
+K 25
+svn:wc:ra_dav:version-url
+V 45
+/svn/!svn/ver/30/trunk/Shell/SS/compilebat.sh
+END
+lockBat.sh
+K 25
+svn:wc:ra_dav:version-url
+V 42
+/svn/!svn/ver/30/trunk/Shell/SS/lockBat.sh
+END
+awk.sh
+K 25
+svn:wc:ra_dav:version-url
+V 38
+/svn/!svn/ver/30/trunk/Shell/SS/awk.sh
+END
+simulate.sh
+K 25
+svn:wc:ra_dav:version-url
+V 43
+/svn/!svn/ver/30/trunk/Shell/SS/simulate.sh
+END
+transform.cpp
+K 25
+svn:wc:ra_dav:version-url
+V 45
+/svn/!svn/ver/30/trunk/Shell/SS/transform.cpp
+END
+clang.sh
+K 25
+svn:wc:ra_dav:version-url
+V 40
+/svn/!svn/ver/30/trunk/Shell/SS/clang.sh
+END
+llvm-compilebat.sh
+K 25
+svn:wc:ra_dav:version-url
+V 50
+/svn/!svn/ver/30/trunk/Shell/SS/llvm-compilebat.sh
+END
+compile.sh
+K 25
+svn:wc:ra_dav:version-url
+V 42
+/svn/!svn/ver/30/trunk/Shell/SS/compile.sh
+END
+simulateBat1.sh
+K 25
+svn:wc:ra_dav:version-url
+V 47
+/svn/!svn/ver/30/trunk/Shell/SS/simulateBat1.sh
+END
+volatileSttram1.sh
+K 25
+svn:wc:ra_dav:version-url
+V 50
+/svn/!svn/ver/30/trunk/Shell/SS/volatileSttram1.sh
+END
+allocate.cpp
+K 25
+svn:wc:ra_dav:version-url
+V 44
+/svn/!svn/ver/30/trunk/Shell/SS/allocate.cpp
+END
+volatileSttram2.sh
+K 25
+svn:wc:ra_dav:version-url
+V 50
+/svn/!svn/ver/30/trunk/Shell/SS/volatileSttram2.sh
+END
+DirectoryDiff.sh
+K 25
+svn:wc:ra_dav:version-url
+V 48
+/svn/!svn/ver/30/trunk/Shell/SS/DirectoryDiff.sh
+END
+llvm-compile.sh
+K 25
+svn:wc:ra_dav:version-url
+V 47
+/svn/!svn/ver/30/trunk/Shell/SS/llvm-compile.sh
+END
+tmp.sh
+K 25
+svn:wc:ra_dav:version-url
+V 38
+/svn/!svn/ver/30/trunk/Shell/SS/tmp.sh
+END
+allocate.h
+K 25
+svn:wc:ra_dav:version-url
+V 42
+/svn/!svn/ver/30/trunk/Shell/SS/allocate.h
+END
+bat-back.sh
+K 25
+svn:wc:ra_dav:version-url
+V 43
+/svn/!svn/ver/30/trunk/Shell/SS/bat-back.sh
+END
+bat.sh
+K 25
+svn:wc:ra_dav:version-url
+V 38
+/svn/!svn/ver/30/trunk/Shell/SS/bat.sh
+END
+timerbat.sh
+K 25
+svn:wc:ra_dav:version-url
+V 43
+/svn/!svn/ver/30/trunk/Shell/SS/timerbat.sh
+END
+recurRename.sh
+K 25
+svn:wc:ra_dav:version-url
+V 46
+/svn/!svn/ver/30/trunk/Shell/SS/recurRename.sh
+END
+simulateBat.sh
+K 25
+svn:wc:ra_dav:version-url
+V 46
+/svn/!svn/ver/30/trunk/Shell/SS/simulateBat.sh
+END
+copy.sh
+K 25
+svn:wc:ra_dav:version-url
+V 39
+/svn/!svn/ver/30/trunk/Shell/SS/copy.sh
+END
