@@ -394,7 +394,7 @@ VOID Image(IMG img, void *v)
 			ADDRINT fAddr = RTN_Address(rtn);				
 			//g_hAddr2Func[fAddr] = szFunc;
 			//cerr << fAddr << ":\t" << szFunc << endl;			
-			
+			bool bNormal = false;
 			for(INS ins = RTN_InsHead(rtn); INS_Valid(ins); ins = INS_Next(ins) )
 			{
 				//3.2 collect stack size via "SUB 0x20, %esp" or "ADD 0xffffffe0, %esp"
@@ -403,32 +403,43 @@ VOID Image(IMG img, void *v)
 					INS_OperandIsImmediate(ins, 1) )
 				{		                         
 					UINT32 nOffset = INS_OperandImmediate(ins, 1);					         	
-					g_hFunc2StackSize[fAddr] = nOffset;	                        
-				}
-				else if( INS_Opcode(ins) == XED_ICLASS_ADD && 
-					INS_OperandReg(ins, 0) == REG_STACK_PTR  &&
-					INS_OperandIsImmediate(ins, 1) )
-				{
-					// debug <<
-					cerr <<endl << szFunc << " has strange stack ";
-					// debug >>
-					UINT32 nOffset = INS_OperandImmediate(ins, 1);					       	
-					g_hFunc2StackSize[fAddr] = nOffset;	  
-				}
+					g_hFunc2StackSize[fAddr] = nOffset;	
+					bNormal = true;                        
+				}				
 
 				// 4. to instrument write operations
 				if ( INS_IsStackWrite(ins) )
 				{		
-					INT32 disp = INS_MemoryDisplacement(ins);
-					// debug <<
-					assert( INS_MemoryBaseReg(ins) == REG_STACK_PTR );
-					assert( disp > 0 );
-					// debug >>
-					INS_InsertPredicatedCall(
-							ins, IPOINT_BEFORE,  (AFUNPTR) StackSingle,				
-							IARG_MEMORYWRITE_EA - disp,
-							IARG_UINT32, disp,
-							IARG_END);
+					// skip call instruction, like: call   0 <__libc_tsd_LOCALE>
+					if( INS_Opcode(ins) == XED_ICLASS_CALL_NEAR )
+								;
+					else
+					{						
+						// debug <<
+						// skip: push 0x0
+						if( INS_MemoryBaseReg(ins) != REG_STACK_PTR )
+						{
+							//cerr << INS_Disassemble(ins) << "not esp" << endl;
+							//assert(INS_MemoryBaseReg(ins) == REG_STACK_PTR);
+							;
+						}
+						else
+						{
+							INT32 disp = INS_MemoryDisplacement(ins);
+							if( disp < 0)
+							{							
+								cerr <<disp << " in function " << szFunc << endl;
+								cerr << INS_Disassemble(ins) << endl;
+								assert( disp > 0);							
+							}	
+							else					
+								INS_InsertPredicatedCall(
+										ins, IPOINT_BEFORE,  (AFUNPTR) StackSingle,				
+										IARG_MEMORYWRITE_EA - disp,
+										IARG_UINT32, disp,
+										IARG_END);
+						}
+					}
 				}
 				else if ( INS_IsMemoryWrite(ins) )
 				{
@@ -439,6 +450,8 @@ VOID Image(IMG img, void *v)
 						IARG_END);		
 				}
 			}
+			if(!bNormal)
+				cerr << "Abnormal stack size in " << szFunc << endl;
 			RTN_Close(rtn);
 		}
 	}	
