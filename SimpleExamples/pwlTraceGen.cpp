@@ -50,8 +50,8 @@ END_LEGAL */
 
 //#define ONLY_MAIN
 
-#define MALLOC "malloc"
-#define FREE "free"
+#define MALLOC "__libc_malloc"
+#define FREE "__cfree"
 
 #define MEM_WIDTH_POWER 2     // 2^n bytes. So 2 means 2^2=4bytes memory width, i.e., 32-bit
 
@@ -135,6 +135,7 @@ std::map<ADDRINT, Object *> g_GlobalMap; // to match end and begin
 //////////////////////////////////////////////////////
 //////// Auxiliary variables /////////////////////////
 ADDRINT g_nEndofImage = 0;
+bool g_bInStack = false;
 
 
 std::list<LifeElement> g_AllocTrace; 
@@ -145,13 +146,13 @@ std::map<ADDRINT, UINT32> g_hFunc2StackSize; // map function address to stack si
 /* ===================================================================== */
 Object *SearchObjectByAddr(ADDRINT addr)
 {
+	//cerr << "begin of search" << endl;
 	Object *obj = NULL;
-	bool bFound = false;
-	std::map<ADDRINT, Object *>::iterator I, E;
+	bool bFound = false;	
 	if (addr < g_nEndofImage )
 	{
-		E = g_GlobalMap.end();
-		for( I = g_GlobalMap.begin(); I != E; ++ I )
+		std::map<ADDRINT, Object *>::iterator I = g_GlobalMap.begin(), E = g_GlobalMap.end();		
+		for(; I != E; ++ I )
 		{
 			obj = I->second;
 			if( addr >= obj->_nStartAddr && addr < obj->_nStartAddr + obj->_nSize)
@@ -163,8 +164,8 @@ Object *SearchObjectByAddr(ADDRINT addr)
 	}
 	else
 	{
-		E = g_HeapMap.end();
-		for( I = g_HeapMap.begin(); I != E; ++ I )
+		std::map<ADDRINT, Object *>::iterator I = g_HeapMap.begin(), E = g_HeapMap.end();
+		for( ; I != E; ++ I )
 		{
 			obj = I->second;
 			if( addr >= obj->_nStartAddr && addr < obj->_nStartAddr + obj->_nSize)
@@ -174,6 +175,7 @@ Object *SearchObjectByAddr(ADDRINT addr)
 			}
 		}
 	}
+	//cerr << "end of search" << endl;
 	if( !bFound )
 		return NULL;
 	return obj;
@@ -234,16 +236,20 @@ VOID FrameEnd(ADDRINT iAddr )
 } */
 VOID FrameBegin(ADDRINT funcAddr, ADDRINT nStartAddr)
 {
+	
 	++ g_nID;
+	cerr <<hex <<g_nID << "<<" << funcAddr << endl;
 	UINT32 nFrameSize = g_hFunc2StackSize[funcAddr];	
 	Object *obj = new Object(g_nID, nFrameSize);	
 	obj->_nStartAddr = nStartAddr;
 	g_AllocTrace.push_back(LifeElement(obj, true));
 	// prepare to match
 	g_FrameStack.push_back(obj);
+	g_bInStack = true;
 }
 VOID FrameEnd(ADDRINT funcAddr)
-{
+{   
+	cerr <<hex << ">>" << funcAddr << endl;
 	Object *obj = g_FrameStack.back();
 	//<<debug
 	UINT32 nFrameSize = g_hFunc2StackSize[funcAddr];
@@ -252,6 +258,7 @@ VOID FrameEnd(ADDRINT funcAddr)
 	g_AllocTrace.push_back(LifeElement(obj,false));
 	// erase the expired object
 	g_FrameStack.pop_back();
+	g_bInStack = false;
 }
 VOID HeapBeginArg(UINT32 nHeapSize)
 {
@@ -263,7 +270,7 @@ VOID HeapBeginArg(UINT32 nHeapSize)
 }
 VOID HeapBeginRet(ADDRINT nStartAddr)
 {
-	Object *obj = g_FrameStack.back();
+	Object *obj = g_HeapStack.back();
 	obj->_nStartAddr = nStartAddr;
 	g_HeapMap[nStartAddr] = obj;
 }
@@ -322,8 +329,11 @@ VOID GlobalEnd()
 /* =======Analysis routines to get write stats for each object=========== */
 /* ===================================================================== */
 // obtain write stats for frame objects
-VOID StackSingle(ADDRINT nStartAddr, UINT32 nOffset)
+VOID StackSingle(ADDRINT addr, UINT32 nOffset)
 {	
+	//cerr << hex << "store in offset: " << nOffset << endl;
+	if( !g_bInStack )
+		return;
 	Object *obj = g_FrameStack.back();
 	UINT32 alignedOffset = nOffset - nOffset%(1<<MEM_WIDTH_POWER);
 	++ obj->_hOffset2W[alignedOffset];	
@@ -340,7 +350,11 @@ VOID StackMulti(ADDRINT addr, UINT32 nOffset, UINT32 nSize)
 // obtain write stats for heap and global objects
 VOID StoreSingle(ADDRINT addr)
 {
+	//cerr << hex << "store in address: " << addr << endl;
 	Object *obj = SearchObjectByAddr(addr);
+	// ???ignoring some addresses for dynamic linking insdead of for global data, such as 0x8048a84 <_dl_use_load_bias>
+	if(obj == NULL )
+		return;
 	UINT32 nOffset = addr - obj->_nStartAddr;
 	UINT32 alignedOffset = nOffset - nOffset%(1<<MEM_WIDTH_POWER);
 	++ obj->_hOffset2W[alignedOffset];	
@@ -366,14 +380,14 @@ VOID Image(IMG img, void *v)
 			RTN_Open(rtn);
 			string szFunc = RTN_Name(rtn);
 			//1. Instrument each function for frame objects
-			ADDRINT funcAddr = RTN_Address(rtn);
-			RTN_InsertCall(rtn, IPOINT_BEFORE, (AFUNPTR) FrameBegin,
-								IARG_ADDRINT, funcAddr,
-								IARG_END);
-			RTN_InsertCall(rtn, IPOINT_AFTER, (AFUNPTR) FrameEnd,
-								IARG_ADDRINT, funcAddr,
-								IARG_END);
-			//2. Instrument malloc/free functions for heap objects
+			//ADDRINT funcAddr = RTN_Address(rtn);
+			//RTN_InsertCall(rtn, IPOINT_BEFORE, (AFUNPTR) FrameBegin,
+			//					IARG_ADDRINT, funcAddr,
+			//					IARG_END);
+			//RTN_InsertCall(rtn, IPOINT_AFTER, (AFUNPTR) FrameEnd,
+			//					IARG_ADDRINT, funcAddr,
+			//					IARG_END);
+			//1. Instrument malloc/free functions for heap objects
 			if( RTN_Name(rtn) == MALLOC )
 			{				
 				RTN_InsertCall(rtn, IPOINT_BEFORE, (AFUNPTR) HeapBeginArg,
@@ -389,56 +403,86 @@ VOID Image(IMG img, void *v)
 								IARG_FUNCARG_ENTRYPOINT_VALUE, 0,
 								IARG_END);
 			}
-			//3. Search each function for stack size
-			//3.1. collect user functions as well as their addresses
+			//2. Search each function for stack size
+			// collect stack size via "SUB 0x20, %esp" or "ADD 0xffffffe0, %esp"
 			ADDRINT fAddr = RTN_Address(rtn);				
 			//g_hAddr2Func[fAddr] = szFunc;
 			//cerr << fAddr << ":\t" << szFunc << endl;			
-			bool bNormal = false;
+			bool bNormal1 = false, bNormal2 = false;
+			INS ins1;
+			std::list<INS> ins2;
 			for(INS ins = RTN_InsHead(rtn); INS_Valid(ins); ins = INS_Next(ins) )
 			{
-				//3.2 collect stack size via "SUB 0x20, %esp" or "ADD 0xffffffe0, %esp"
+			// note that, a function may have one entry (sub) but multiple exits (add)				
 				if( INS_Opcode(ins) == XED_ICLASS_SUB && 
 					INS_OperandReg(ins, 0) == REG_STACK_PTR  &&
 					INS_OperandIsImmediate(ins, 1) )
 				{		                         
 					UINT32 nOffset = INS_OperandImmediate(ins, 1);					         	
 					g_hFunc2StackSize[fAddr] = nOffset;	
-					bNormal = true;                        
-				}				
-
-				// 4. to instrument write operations
+					bNormal1 = true;    
+					ins1 = ins;					                 
+				}
+				else if( INS_Opcode(ins) == XED_ICLASS_ADD && 
+					INS_OperandReg(ins, 0) == REG_STACK_PTR  &&
+					INS_OperandIsImmediate(ins, 1) )
+				{		              
+					bNormal2 = true;     
+					ins2.push_back(ins); 					                     
+				}		
+			}	
+			
+			// 3.1 instrument frame allocation and deallocation
+			if( bNormal1 && bNormal2 )
+			{
+				//cerr << hex <<"=" << fAddr << INS_Disassemble(ins1) << "-" << INS_Disassemble(*ins2.begin()) << endl;
+				INS_InsertPredicatedCall(
+					ins1, IPOINT_BEFORE,  (AFUNPTR) FrameBegin,
+					IARG_ADDRINT, fAddr,
+					IARG_END);   
+				std::list<INS>::iterator i_p = ins2.begin(), i_e = ins2.end();
+				for(; i_p != i_e; ++ i_p )
+					INS_InsertPredicatedCall(
+						*i_p, IPOINT_BEFORE,  (AFUNPTR) FrameEnd,
+						IARG_ADDRINT, fAddr,
+						IARG_END); 	
+			}
+			RTN_Close(rtn);
+			// ignoring function stacks without "sub esp, 0x4", which appears for small library functions, like _start, etc
+			// the skip is somehow reasonable, since these frames are small and not write-intensive
+			if( !bNormal1 || !bNormal2)	
+				continue;
+			RTN_Open(rtn);
+			// 4. to instrument write operations, only considering function with normal stack
+			for(INS ins = RTN_InsHead(rtn); INS_Valid(ins); ins = INS_Next(ins) )
+			{				
 				if ( INS_IsStackWrite(ins) )
 				{		
-					// skip call instruction, like: call   0 <__libc_tsd_LOCALE>
+					// skip call instruction, like: call   0 <__libc_tsd_LOCALE>, which has 
 					if( INS_Opcode(ins) == XED_ICLASS_CALL_NEAR )
 								;
+					// skip: push 0x0
+					else if( INS_MemoryBaseReg(ins) != REG_STACK_PTR )
+					{	
+						//cerr << INS_Disassemble(ins) << "not esp" << endl;
+						//assert(INS_MemoryBaseReg(ins) == REG_STACK_PTR);
+						;
+					}
 					else
-					{						
-						// debug <<
-						// skip: push 0x0
-						if( INS_MemoryBaseReg(ins) != REG_STACK_PTR )
-						{
-							//cerr << INS_Disassemble(ins) << "not esp" << endl;
-							//assert(INS_MemoryBaseReg(ins) == REG_STACK_PTR);
-							;
-						}
-						else
-						{
-							INT32 disp = INS_MemoryDisplacement(ins);
-							if( disp < 0)
-							{							
-								cerr <<disp << " in function " << szFunc << endl;
-								cerr << INS_Disassemble(ins) << endl;
-								assert( disp > 0);							
-							}	
-							else					
-								INS_InsertPredicatedCall(
-										ins, IPOINT_BEFORE,  (AFUNPTR) StackSingle,				
-										IARG_MEMORYWRITE_EA - disp,
-										IARG_UINT32, disp,
-										IARG_END);
-						}
+					{
+						INT32 disp = INS_MemoryDisplacement(ins);
+						if( disp < 0)
+						{							
+							cerr <<disp << " in function " << szFunc << endl;
+							cerr << INS_Disassemble(ins) << endl;
+							assert( disp > 0);							
+						}	
+						else					
+							INS_InsertPredicatedCall(
+									ins, IPOINT_BEFORE,  (AFUNPTR) StackSingle,				
+									IARG_MEMORYWRITE_EA,
+									IARG_UINT32, (UINT32)disp,
+									IARG_END);
 					}
 				}
 				else if ( INS_IsMemoryWrite(ins) )
@@ -450,18 +494,22 @@ VOID Image(IMG img, void *v)
 						IARG_END);		
 				}
 			}
-			if(!bNormal)
-				cerr << "Abnormal stack size in " << szFunc << endl;
+			
 			RTN_Close(rtn);
 		}
-	}	
+	}		
 }
 
 /* ===================================================================== */
 
 VOID Fini(int code, VOID * v)
 {
-       
+    g_nProfDistPower = KnobProfDistance.Value();
+	char buf[256];
+    sprintf(buf, "%u",g_nProfDistPower);
+    string szOutFile = KnobOutputFile.Value() +"_" + buf;
+
+    g_outFile.open(szOutFile.c_str());
     g_outFile << "PIN:MEMLATENCIES 1.0. 0x0\n";
             
     g_outFile <<
@@ -470,7 +518,7 @@ VOID Fini(int code, VOID * v)
 	g_outFile << (1<<g_nProfDistPower);
 	g_outFile <<	"\n\n";
 	g_outFile << "Total objects count:\t" << g_nID << endl;	
-	
+	cerr << "Output" << endl;
 	std::list<LifeElement>::iterator I = g_AllocTrace.begin(), E = g_AllocTrace.end();
 	for(; I != E; ++ I)
 	{
@@ -506,19 +554,13 @@ int main(int argc, char *argv[])
     {
         return Usage();
     }
-	g_nProfDistPower = KnobProfDistance.Value();
-	char buf[256];
-    sprintf(buf, "%u",g_nProfDistPower);
-    string szOutFile = KnobOutputFile.Value() +"_" + buf;
-
-    g_outFile.open(szOutFile.c_str());
+	
     
 	IMG_AddInstrumentFunction(Image, 0);
 
     PIN_AddFiniFunction(Fini, 0);
 
-    // Never returns
-
+    // Never returns	
     PIN_StartProgram();
     
     return 0;
