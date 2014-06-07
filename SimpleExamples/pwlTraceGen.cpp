@@ -29,13 +29,15 @@ THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 END_LEGAL */
 //
-// @ORIGINAL_AUTHOR: Artur Klauser
-// @EXTENDED: Rodric Rabbah (rodric@gmail.com) 
+// @ORIGINAL_AUTHOR: Qingan Li (ww345ww@gmail.com) 
+//
 //
 
 /*! @file
- *  This file contains an ISA-portable cache simulator
- *  data cache hierarchies
+ *  This file contains is used to generate memory write trace,
+ *   as well as memory allocation trace in granularity of stack frame, heap object, and global object.
+ *  This tool is only partially tested in ia32 host architecture.
+ *  For a more strong version, the "!!!" in comments indicates errors, while "???" indicates potential bugs.
  */
 
 
@@ -48,10 +50,11 @@ END_LEGAL */
 #include <sstream>
 #include <assert.h>
 
-//#define ONLY_MAIN
+#define HEAP
+#define GLOBAL
 
-#define MALLOC "__libc_malloc"
-#define FREE "__cfree"
+#define MALLOC "__malloc"
+#define FREE "__libc_free"
 
 #define MEM_WIDTH_POWER 2     // 2^n bytes. So 2 means 2^2=4bytes memory width, i.e., 32-bit
 
@@ -135,7 +138,10 @@ std::map<ADDRINT, Object *> g_GlobalMap; // to match end and begin
 //////////////////////////////////////////////////////
 //////// Auxiliary variables /////////////////////////
 ADDRINT g_nEndofImage = 0;
-bool g_bInStack = false;
+bool g_bInStack = false; 
+std::list<Object *> g_Objects;   // for memory release
+
+std::map<ADDRINT, std::string> g_hAddr2Func; // for debug
 
 
 std::list<LifeElement> g_AllocTrace; 
@@ -234,14 +240,13 @@ VOID FrameEnd(ADDRINT iAddr )
 		g_RetStack.pop_back();
 	}
 } */
-VOID FrameBegin(ADDRINT funcAddr, ADDRINT nStartAddr)
-{
-	
+VOID FrameBegin(ADDRINT funcAddr)
+{	
 	++ g_nID;
-	cerr <<hex <<g_nID << "<<" << funcAddr << endl;
+	//cerr <<hex <<g_nID << "<<" << g_hAddr2Func[funcAddr] << endl;
 	UINT32 nFrameSize = g_hFunc2StackSize[funcAddr];	
 	Object *obj = new Object(g_nID, nFrameSize);	
-	obj->_nStartAddr = nStartAddr;
+	g_Objects.push_back(obj);
 	g_AllocTrace.push_back(LifeElement(obj, true));
 	// prepare to match
 	g_FrameStack.push_back(obj);
@@ -249,7 +254,7 @@ VOID FrameBegin(ADDRINT funcAddr, ADDRINT nStartAddr)
 }
 VOID FrameEnd(ADDRINT funcAddr)
 {   
-	cerr <<hex << ">>" << funcAddr << endl;
+	//cerr <<hex << ">>" << g_hAddr2Func[funcAddr] << endl;
 	Object *obj = g_FrameStack.back();
 	//<<debug
 	UINT32 nFrameSize = g_hFunc2StackSize[funcAddr];
@@ -262,21 +267,27 @@ VOID FrameEnd(ADDRINT funcAddr)
 }
 VOID HeapBeginArg(UINT32 nHeapSize)
 {
+	cerr << "Heap alloc size:\t" << nHeapSize << endl;
 	++ g_nID;
 	Object *obj = new Object(g_nID, nHeapSize);
+	g_Objects.push_back(obj);
 	g_AllocTrace.push_back(LifeElement(obj, true) );
 	// prepare to match
 	g_HeapStack.push_back(obj);
 }
 VOID HeapBeginRet(ADDRINT nStartAddr)
 {
+	cerr << "Heap alloc address:\t" << nStartAddr << endl;
 	Object *obj = g_HeapStack.back();
 	obj->_nStartAddr = nStartAddr;
 	g_HeapMap[nStartAddr] = obj;
+	g_HeapStack.pop_back();
 }
+
 
 VOID HeapEnd(ADDRINT nStartAddr)
 {
+	cerr << "Heap dealloc address:\t" << hex << nStartAddr << endl;
 	Object *obj = g_HeapMap[nStartAddr];
 	g_AllocTrace.push_back(LifeElement(obj, false));
 	// erase expired object
@@ -292,12 +303,16 @@ VOID GlobalBegin()
 	while(symFile.good())
 	{
 		getline(symFile, szLine);
-		if( szLine.size() < 2)
+		if( szLine[0] == '#' )
 			continue;
+		if( szLine.size() < 3)
+			continue;
+		std::string szName;
 		ADDRINT addr;
 		UINT32 size;
 		stringstream ss(szLine);
-		ss >> addr >> size;
+		ss >> szName >> hex >> addr >> size;
+		//cerr << szName << hex << addr <<  size << endl;
 		g_GlobalTmp[addr]=size;		
 	}
 	symFile.close();
@@ -308,11 +323,13 @@ VOID GlobalBegin()
 	{
 		++ g_nID;
 		Object *obj = new Object(g_nID, I->second);
+		g_Objects.push_back(obj);
 		obj->_nStartAddr = I->first;
 		g_AllocTrace.push_back(LifeElement(obj, true) );	
 		// prepare to match
 		g_GlobalMap[I->first] = obj;
 	}	
+	cerr << "Read " << g_GlobalMap.size() << " globals finished" << endl;
 }
 VOID GlobalEnd()
 {
@@ -329,7 +346,7 @@ VOID GlobalEnd()
 /* =======Analysis routines to get write stats for each object=========== */
 /* ===================================================================== */
 // obtain write stats for frame objects
-VOID StackSingle(ADDRINT addr, UINT32 nOffset)
+VOID StackSingle(UINT32 nOffset)
 {	
 	//cerr << hex << "store in offset: " << nOffset << endl;
 	if( !g_bInStack )
@@ -338,7 +355,7 @@ VOID StackSingle(ADDRINT addr, UINT32 nOffset)
 	UINT32 alignedOffset = nOffset - nOffset%(1<<MEM_WIDTH_POWER);
 	++ obj->_hOffset2W[alignedOffset];	
 }
-VOID StackMulti(ADDRINT addr, UINT32 nOffset, UINT32 nSize)
+VOID StackMulti(UINT32 nOffset, UINT32 nSize)
 {
 	Object *obj = g_FrameStack.back();
 	UINT32 nOffset2 = nOffset + nSize-1;
@@ -371,7 +388,7 @@ VOID StoreMulti(ADDRINT addr, UINT32 nSize)
 }
 /* ===================================================================== */
 VOID Image(IMG img, void *v)
-{	
+{		
 	g_nEndofImage = IMG_HighAddress(img);
 	for (SEC sec = IMG_SecHead(img); SEC_Valid(sec); sec = SEC_Next(sec) )
 	{
@@ -379,6 +396,7 @@ VOID Image(IMG img, void *v)
 		{
 			RTN_Open(rtn);
 			string szFunc = RTN_Name(rtn);
+			//cerr << szFunc << "\t" << endl;
 			//1. Instrument each function for frame objects
 			//ADDRINT funcAddr = RTN_Address(rtn);
 			//RTN_InsertCall(rtn, IPOINT_BEFORE, (AFUNPTR) FrameBegin,
@@ -388,14 +406,17 @@ VOID Image(IMG img, void *v)
 			//					IARG_ADDRINT, funcAddr,
 			//					IARG_END);
 			//1. Instrument malloc/free functions for heap objects
+#ifdef HEAP
 			if( RTN_Name(rtn) == MALLOC )
 			{				
 				RTN_InsertCall(rtn, IPOINT_BEFORE, (AFUNPTR) HeapBeginArg,
-								//IARG_ADDRINT, MALLOC,
+								//IARG_THREAD_ID,
 								IARG_FUNCARG_ENTRYPOINT_VALUE, 0,
 								IARG_END);
 				RTN_InsertCall(rtn, IPOINT_AFTER, (AFUNPTR)HeapBeginRet,
-								IARG_FUNCRET_EXITPOINT_VALUE, IARG_END);				
+								//IARG_THREAD_ID,
+								IARG_FUNCRET_EXITPOINT_VALUE, 
+								IARG_END);				
 			}
 			else if( RTN_Name(rtn) == FREE )
 			{
@@ -403,9 +424,25 @@ VOID Image(IMG img, void *v)
 								IARG_FUNCARG_ENTRYPOINT_VALUE, 0,
 								IARG_END);
 			}
+			else
+#endif 
+#ifdef GLOBAL
+			if( szFunc == "main" )
+			{				
+				//cerr << "instrument main for global allocation" << endl;
+				RTN_InsertCall(rtn, IPOINT_BEFORE, (AFUNPTR) GlobalBegin,								
+								IARG_END);
+				RTN_InsertCall(rtn, IPOINT_AFTER, (AFUNPTR) GlobalEnd,
+								IARG_END);				
+			}
+#endif
 			//2. Search each function for stack size
-			// collect stack size via "SUB 0x20, %esp" or "ADD 0xffffffe0, %esp"
-			ADDRINT fAddr = RTN_Address(rtn);				
+			// 1) frame allocation: "sub-esp" like "SUB 0x20, %esp" or "ADD 0xffffffe0, %esp"; or "entry" like "entry 0x10, 0". 
+			//    Currently, "entry" has not been handled since it has not been seen ???.
+			// 2) frame deallocation: "add-esp" like "ADD 0x20, %esp"; or "leave"; or ""lea  -0xc[ebp],esp"
+			// 3) note that, a function may have one entry (sub) but multiple exits (add)	
+			ADDRINT fAddr = RTN_Address(rtn);	
+							
 			//g_hAddr2Func[fAddr] = szFunc;
 			//cerr << fAddr << ":\t" << szFunc << endl;			
 			bool bNormal1 = false, bNormal2 = false;
@@ -413,39 +450,77 @@ VOID Image(IMG img, void *v)
 			std::list<INS> ins2;
 			for(INS ins = RTN_InsHead(rtn); INS_Valid(ins); ins = INS_Next(ins) )
 			{
-			// note that, a function may have one entry (sub) but multiple exits (add)				
+				std::string szIns = INS_Disassemble(ins);
 				if( INS_Opcode(ins) == XED_ICLASS_SUB && 
 					INS_OperandReg(ins, 0) == REG_STACK_PTR  &&
-					INS_OperandIsImmediate(ins, 1) )
-				{		                         
-					UINT32 nOffset = INS_OperandImmediate(ins, 1);					         	
-					g_hFunc2StackSize[fAddr] = nOffset;	
-					bNormal1 = true;    
-					ins1 = ins;					                 
+					INS_OperandIsImmediate(ins, 1) )         
+				{	
+					INT32 disp =  INS_OperandImmediate(ins, 1);	 
+					// only consider the first "sub-esp", i.g., <check_free> function has multiple sub-esp     
+					if( disp > 0 && !bNormal1 ) 
+					{
+						bNormal1 = true;    
+						ins1 = ins;		
+					}
+					else if( disp < 0 )
+					{
+						bNormal2 = true;
+						ins2.push_back(ins);
+					}			                 
 				}
 				else if( INS_Opcode(ins) == XED_ICLASS_ADD && 
 					INS_OperandReg(ins, 0) == REG_STACK_PTR  &&
 					INS_OperandIsImmediate(ins, 1) )
-				{		              
+				{		            
+					INT32 disp =  INS_OperandImmediate(ins, 1);	      
+					// only consider the first "sub-esp", i.g., <check_free> function has multiple sub-esp     
+					if( disp < 0 && !bNormal1 )
+					{
+						bNormal1 = true;    
+						ins1 = ins;	
+					}
+					else if(disp > 0 )
+					{ 
+						bNormal2 = true;     
+						ins2.push_back(ins); 		
+					}			                     
+				}	
+				// deal with situations when "lea  -0xc[ebp],esp" is used to replace "add-esp"	
+				else if( INS_Opcode(ins) == XED_ICLASS_LEA &&
+						INS_OperandReg(ins,0) == REG_STACK_PTR )
+				{
 					bNormal2 = true;     
-					ins2.push_back(ins); 					                     
-				}		
+					ins2.push_back(ins);
+				}
+				else if( INS_Opcode(ins) == XED_ICLASS_LEAVE )
+				{
+					bNormal2 = true;     
+					ins2.push_back(ins);
+				}
 			}	
 			
-			// 3.1 instrument frame allocation and deallocation
+			// 3.1 instrument frame allocation and deallocation, global allocation and deallocation
 			if( bNormal1 && bNormal2 )
-			{
-				//cerr << hex <<"=" << fAddr << INS_Disassemble(ins1) << "-" << INS_Disassemble(*ins2.begin()) << endl;
+			{				
+				//cerr << hex <<"=" << szFunc << ":" << INS_Disassemble(ins1) << "-" << INS_Disassemble(*ins2.begin()) << endl;
+				UINT32 nOffset = INS_OperandImmediate(ins1, 1);					         	
+				g_hFunc2StackSize[fAddr] = nOffset;	
+				
 				INS_InsertPredicatedCall(
-					ins1, IPOINT_BEFORE,  (AFUNPTR) FrameBegin,
-					IARG_ADDRINT, fAddr,
+					ins1, IPOINT_AFTER,  (AFUNPTR) FrameBegin,
+					IARG_ADDRINT, fAddr,					
 					IARG_END);   
 				std::list<INS>::iterator i_p = ins2.begin(), i_e = ins2.end();
 				for(; i_p != i_e; ++ i_p )
+				{
+					// << for debug
+					//assert(nOffset = INS_OperandImmediate(*i_p,1));
+					// >> 
 					INS_InsertPredicatedCall(
 						*i_p, IPOINT_BEFORE,  (AFUNPTR) FrameEnd,
 						IARG_ADDRINT, fAddr,
-						IARG_END); 	
+						IARG_END); 					
+				}
 			}
 			RTN_Close(rtn);
 			// ignoring function stacks without "sub esp, 0x4", which appears for small library functions, like _start, etc
@@ -480,7 +555,7 @@ VOID Image(IMG img, void *v)
 						else					
 							INS_InsertPredicatedCall(
 									ins, IPOINT_BEFORE,  (AFUNPTR) StackSingle,				
-									IARG_MEMORYWRITE_EA,
+									//IARG_MEMORYWRITE_EA,
 									IARG_UINT32, (UINT32)disp,
 									IARG_END);
 					}
@@ -517,8 +592,7 @@ VOID Fini(int code, VOID * v)
         "# Write stats with distance size:\t";
 	g_outFile << (1<<g_nProfDistPower);
 	g_outFile <<	"\n\n";
-	g_outFile << "Total objects count:\t" << g_nID << endl;	
-	cerr << "Output" << endl;
+	g_outFile << "Total objects count:\t" << g_nID << endl;		
 	std::list<LifeElement>::iterator I = g_AllocTrace.begin(), E = g_AllocTrace.end();
 	for(; I != E; ++ I)
 	{
@@ -539,7 +613,11 @@ VOID Fini(int code, VOID * v)
 		if( !obj->_hOffset2W.empty() )
 			g_outFile << endl;
 	}
+	cerr << "Output finished" << endl;
     g_outFile.close();
+    std::list<Object *>::iterator o_p = g_Objects.begin(), o_e = g_Objects.end();
+    for(; o_p != o_e; ++ o_p )
+    	delete *o_p;
 }
 
 /* ===================================================================== */
@@ -553,8 +631,7 @@ int main(int argc, char *argv[])
     if( PIN_Init(argc,argv) )
     {
         return Usage();
-    }
-	
+    }	
     
 	IMG_AddInstrumentFunction(Image, 0);
 
