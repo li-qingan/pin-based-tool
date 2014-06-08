@@ -130,7 +130,7 @@ UINT64 g_nID = 0;		  // unique ID for each frame
 std::list<Object *> g_FrameStack;   // to match end and begin
 //std::list<ADDRINT> g_RetStack; // stack for return addresses
 
-std::list<Object *> g_HeapStack;  // to associate heap size with heap starting address
+std::list<UINT32> g_HeapStack;  // to associate heap size with heap starting address
 std::map<ADDRINT, Object *> g_HeapMap; // the map of starting address to heap objects, to match end and begin
 
 std::map<ADDRINT, UINT32> g_GlobalTmp; // <address, size> of a global data
@@ -242,10 +242,9 @@ VOID FrameEnd(ADDRINT iAddr )
 } */
 VOID FrameBegin(ADDRINT funcAddr)
 {	
-	++ g_nID;
 	//cerr <<hex <<g_nID << "<<" << g_hAddr2Func[funcAddr] << endl;
 	UINT32 nFrameSize = g_hFunc2StackSize[funcAddr];	
-	Object *obj = new Object(g_nID, nFrameSize);	
+	Object *obj = new Object(++g_nID, nFrameSize);	
 	g_Objects.push_back(obj);
 	g_AllocTrace.push_back(LifeElement(obj, true));
 	// prepare to match
@@ -267,23 +266,24 @@ VOID FrameEnd(ADDRINT funcAddr)
 }
 VOID HeapBeginArg(UINT32 nHeapSize)
 {
-	cerr << "Heap alloc size:\t" << nHeapSize << endl;
-	++ g_nID;
-	Object *obj = new Object(g_nID, nHeapSize);
-	g_Objects.push_back(obj);
-	g_AllocTrace.push_back(LifeElement(obj, true) );
+	cerr <<hex << "Heap alloc size:\t" << nHeapSize << endl;
+	
 	// prepare to match
-	g_HeapStack.push_back(obj);
+	g_HeapStack.push_back(nHeapSize);
 }
 VOID HeapBeginRet(ADDRINT nStartAddr)
 {
-	cerr << "Heap alloc address:\t" << nStartAddr << endl;
-	Object *obj = g_HeapStack.back();
+	cerr << "Heap alloc address:\t" <<hex << nStartAddr << endl;
+	
+	UINT32 nHeapSize = g_HeapStack.back();
+	Object *obj = new Object(++g_nID, nHeapSize);
 	obj->_nStartAddr = nStartAddr;
+	g_Objects.push_back(obj);
+	g_AllocTrace.push_back(LifeElement(obj, true) );
+	
+	// prepare for write stats
 	g_HeapMap[nStartAddr] = obj;
-	g_HeapStack.pop_back();
 }
-
 
 VOID HeapEnd(ADDRINT nStartAddr)
 {
@@ -321,8 +321,7 @@ VOID GlobalBegin()
 	std::map<ADDRINT, UINT32>::iterator I = g_GlobalTmp.begin(), E = g_GlobalTmp.end();
 	for(; I != E; ++ I )
 	{
-		++ g_nID;
-		Object *obj = new Object(g_nID, I->second);
+		Object *obj = new Object(++g_nID, I->second);
 		g_Objects.push_back(obj);
 		obj->_nStartAddr = I->first;
 		g_AllocTrace.push_back(LifeElement(obj, true) );	
@@ -441,6 +440,9 @@ VOID Image(IMG img, void *v)
 			//    Currently, "entry" has not been handled since it has not been seen ???.
 			// 2) frame deallocation: "add-esp" like "ADD 0x20, %esp"; or "leave"; or ""lea  -0xc[ebp],esp"
 			// 3) note that, a function may have one entry (sub) but multiple exits (add)	
+			// 4) This method can also be used to match function entry with exit, which is 
+			//    more normal than using "RTN_InsertCall(rtn, IPOINT_AFTER/IPINT_BEFORE". 
+			//    This is because some functions may have no "ret" but "jmp", like "malloc_hook_ini", but must restore the stack size. 
 			ADDRINT fAddr = RTN_Address(rtn);	
 							
 			//g_hAddr2Func[fAddr] = szFunc;
