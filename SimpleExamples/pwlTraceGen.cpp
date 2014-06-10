@@ -65,7 +65,7 @@ END_LEGAL */
 KNOB<string> KnobOutputFile(KNOB_MODE_WRITEONCE,    "pintool",
     "o", "stack.out", "specify dcache file name");
 KNOB<UINT32> KnobProfDistance(KNOB_MODE_WRITEONCE, "pintool",
-    "d","5", "profing distance power: n -> 2^n");
+    "d","2", "profing distance power: n -> 2^n");
 
 
 
@@ -98,13 +98,7 @@ struct Object
 	
 	Object(UINT64 id, UINT32 nSize)
 	{
-		_id = id; _nSize = nSize;
-	}
-	
-	Object(Object *obj)
-	{
-		_id = obj->_id;
-		_nSize = obj->_nSize;
+		_id = id; _nSize = nSize; _nStartAddr = 0;
 	}
 };
 struct LifeElement
@@ -142,10 +136,14 @@ bool g_bInStack = false;
 std::list<Object *> g_Objects;   // for memory release
 
 std::map<ADDRINT, std::string> g_hAddr2Func; // for debug
-
+std::map<ADDRINT, UINT32> g_hFunc2StackSize; // map function address to stack size
 
 std::list<LifeElement> g_AllocTrace; 
-std::map<ADDRINT, UINT32> g_hFunc2StackSize; // map function address to stack size
+
+// for stats
+UINT32 g_nTotalFrame = 0;
+UINT32 g_nTotalGlobal = 0;
+UINT32 g_nTotalHeap = 0;
 
 /* ===================================================================== */
 /* ===================Auxiliary routines============================== */
@@ -250,6 +248,8 @@ VOID FrameBegin(ADDRINT funcAddr)
 	// prepare to match
 	g_FrameStack.push_back(obj);
 	g_bInStack = true;
+	
+	++ g_nTotalFrame;
 }
 VOID FrameEnd(ADDRINT funcAddr)
 {   
@@ -266,14 +266,14 @@ VOID FrameEnd(ADDRINT funcAddr)
 }
 VOID HeapBeginArg(UINT32 nHeapSize)
 {
-	cerr <<hex << "Heap alloc size:\t" << nHeapSize << endl;
+	//cerr <<hex << "Heap alloc size:\t" << nHeapSize << endl;
 	
 	// prepare to match
 	g_HeapStack.push_back(nHeapSize);
 }
 VOID HeapBeginRet(ADDRINT nStartAddr)
 {
-	cerr << "Heap alloc address:\t" <<hex << nStartAddr << endl;
+	//cerr << "Heap alloc address:\t" <<hex << nStartAddr << endl;
 	
 	UINT32 nHeapSize = g_HeapStack.back();
 	Object *obj = new Object(++g_nID, nHeapSize);
@@ -283,11 +283,13 @@ VOID HeapBeginRet(ADDRINT nStartAddr)
 	
 	// prepare for write stats
 	g_HeapMap[nStartAddr] = obj;
+	
+	++ g_nTotalHeap;
 }
 
 VOID HeapEnd(ADDRINT nStartAddr)
 {
-	cerr << "Heap dealloc address:\t" << hex << nStartAddr << endl;
+	//cerr << "Heap dealloc address:\t" << hex << nStartAddr << endl;
 	Object *obj = g_HeapMap[nStartAddr];
 	g_AllocTrace.push_back(LifeElement(obj, false));
 	// erase expired object
@@ -328,7 +330,8 @@ VOID GlobalBegin()
 		// prepare to match
 		g_GlobalMap[I->first] = obj;
 	}	
-	cerr << "Read " << g_GlobalMap.size() << " globals finished" << endl;
+	g_nTotalGlobal = g_GlobalMap.size();
+	cerr << "Read " << g_nTotalGlobal << " globals finished" << endl;
 }
 VOID GlobalEnd()
 {
@@ -423,7 +426,7 @@ VOID Image(IMG img, void *v)
 								IARG_FUNCARG_ENTRYPOINT_VALUE, 0,
 								IARG_END);
 			}
-			else
+			
 #endif 
 #ifdef GLOBAL
 			if( szFunc == "main" )
@@ -501,7 +504,7 @@ VOID Image(IMG img, void *v)
 				}
 			}	
 			
-			// 3.1 instrument frame allocation and deallocation, global allocation and deallocation
+			// 3.1 instrument frame allocation and deallocation
 			if( bNormal1 && bNormal2 )
 			{				
 				//cerr << hex <<"=" << szFunc << ":" << INS_Disassemble(ins1) << "-" << INS_Disassemble(*ins2.begin()) << endl;
@@ -594,7 +597,9 @@ VOID Fini(int code, VOID * v)
         "# Write stats with distance size:\t";
 	g_outFile << (1<<g_nProfDistPower);
 	g_outFile <<	"\n\n";
-	g_outFile << "Total objects count:\t" << g_nID << endl;		
+	g_outFile << "Total objects count:\t" << g_nID;
+	g_outFile << "(frame: " << g_nTotalFrame<< ", heap: " << g_nTotalHeap << ", global: " << g_nTotalGlobal << ")"<< endl;
+	g_outFile << "region\tID\tsize\tentry/exit\tnum" << endl;		
 	std::list<LifeElement>::iterator I = g_AllocTrace.begin(), E = g_AllocTrace.end();
 	for(; I != E; ++ I)
 	{
@@ -602,7 +607,15 @@ VOID Fini(int code, VOID * v)
 		bool begin = I->_begin;
 		
 		// print object allocation request as well as object write stats
-		g_outFile << hex << obj->_id << "\t" << obj->_nSize << "\t" << begin << endl;
+		
+		if( obj->_nStartAddr == 0 )
+			g_outFile << "@s\t";
+		else if( obj->_nStartAddr < g_nEndofImage )
+			g_outFile << "@g\t";
+		else 
+			g_outFile << "@h\t";
+		
+		g_outFile << hex << obj->_id << "\t" << obj->_nSize << "\t" << begin << "\t" << obj->_hOffset2W.size() << endl;
 		if( !begin)
 			continue;
 		if( !obj->_hOffset2W.empty() )
@@ -610,7 +623,7 @@ VOID Fini(int code, VOID * v)
 		std::map<UINT32, UINT64>::iterator J_p = obj->_hOffset2W.begin(), J_e = obj->_hOffset2W.end();
 		for(; J_p != J_e; ++ J_p )
 		{
-			g_outFile << hex << J_p->first << ":" << J_p->second << "\t";
+			g_outFile << hex << J_p->first << " " << J_p->second << "\t";
 		}
 		if( !obj->_hOffset2W.empty() )
 			g_outFile << endl;
