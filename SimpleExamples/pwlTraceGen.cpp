@@ -241,6 +241,14 @@ VOID FrameEnd(ADDRINT iAddr )
 VOID FrameBegin(ADDRINT funcAddr)
 {	
 	//cerr <<hex <<g_nID << "<<" << g_hAddr2Func[funcAddr] << endl;
+	// a special case: Using an extra "pop" to restore the stack
+	if( g_hAddr2Func[funcAddr] == "malloc_hook_ini" )
+	{	
+		//cerr <<hex << ">>__malloc" << endl;
+		g_FrameStack.pop_back(); // finishing the test version of "__malloc". 
+		Object *obj = g_FrameStack.back();
+		g_AllocTrace.push_back(LifeElement(obj,false));
+	}
 	UINT32 nFrameSize = g_hFunc2StackSize[funcAddr];	
 	Object *obj = new Object(++g_nID, nFrameSize);	
 	g_Objects.push_back(obj);
@@ -448,7 +456,7 @@ VOID Image(IMG img, void *v)
 			//    This is because some functions may have no "ret" but "jmp", like "malloc_hook_ini", but must restore the stack size. 
 			ADDRINT fAddr = RTN_Address(rtn);	
 							
-			//g_hAddr2Func[fAddr] = szFunc;
+			g_hAddr2Func[fAddr] = szFunc;
 			//cerr << fAddr << ":\t" << szFunc << endl;			
 			bool bNormal1 = false, bNormal2 = false;
 			INS ins1;
@@ -552,10 +560,15 @@ VOID Image(IMG img, void *v)
 					{
 						INT32 disp = INS_MemoryDisplacement(ins);
 						if( disp < 0)
-						{							
-							cerr <<disp << " in function " << szFunc << endl;
-							cerr << INS_Disassemble(ins) << endl;
-							assert( disp > 0);							
+						{		
+							if( szFunc != "__libc_sigaction")  // a special case
+							{
+								cerr <<disp << " in function " << szFunc << endl;
+								cerr << INS_Disassemble(ins) << endl;
+							}
+							continue;
+							
+							//assert( disp > 0);							
 						}	
 						else					
 							INS_InsertPredicatedCall(
