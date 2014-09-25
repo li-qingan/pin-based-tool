@@ -55,6 +55,8 @@ END_LEGAL */
 
 #define MALLOC "__malloc"
 #define FREE "__libc_free"
+#define EXCEP1 "__libc_malloc"
+
 
 #define MEM_WIDTH_POWER 2     // 2^n bytes. So 2 means 2^2=4bytes memory width, i.e., 32-bit
 
@@ -115,6 +117,7 @@ struct LifeElement
 
 UINT32 g_nProfDistPower = 5;
 std::ofstream g_outFile;
+std::string g_szSymFile;
 
 
 
@@ -145,12 +148,22 @@ UINT32 g_nTotalFrame = 0;
 UINT32 g_nTotalGlobal = 0;
 UINT32 g_nTotalHeap = 0;
 
+UINT32 g_nStackSize_ = 0;
+UINT32 g_nStackSize = 0;
+
+
+UINT32 g_nStaticSize = 0;
+
+UINT32 g_nHeapSize_ = 0;
+UINT32 g_nHeapSize = 0;
+
 /* ===================================================================== */
 /* ===================Auxiliary routines============================== */
 /* ===================================================================== */
 Object *SearchObjectByAddr(ADDRINT addr)
 {
-	//cerr << "begin of search" << endl;
+	if( addr < 0x4c0000 )
+		cerr << "begin of search " << hex << addr << endl;
 	Object *obj = NULL;
 	bool bFound = false;	
 	if (addr < g_nEndofImage )
@@ -240,14 +253,14 @@ VOID FrameEnd(ADDRINT iAddr )
 } */
 VOID FrameBegin(ADDRINT funcAddr)
 {	
-	//cerr <<hex <<g_nID << "<<" << g_hAddr2Func[funcAddr] << endl;
+	cerr <<hex <<g_nID << "<<" << g_hAddr2Func[funcAddr] << "[" << g_hFunc2StackSize[funcAddr] << endl;
 	// a special case: Using an extra "pop" to restore the stack
-	if( g_hAddr2Func[funcAddr] == "malloc_hook_ini" )
+	//if( g_hAddr2Func[funcAddr] == "malloc_hook_ini" )
 	{	
 		//cerr <<hex << ">>__malloc" << endl;
-		g_FrameStack.pop_back(); // finishing the test version of "__malloc". 
-		Object *obj = g_FrameStack.back();
-		g_AllocTrace.push_back(LifeElement(obj,false));
+	//	g_FrameStack.pop_back(); // finishing the test version of "__malloc". 
+	//	Object *obj = g_FrameStack.back();
+	//	g_AllocTrace.push_back(LifeElement(obj,false));
 	}
 	UINT32 nFrameSize = g_hFunc2StackSize[funcAddr];	
 	Object *obj = new Object(++g_nID, nFrameSize);	
@@ -255,13 +268,17 @@ VOID FrameBegin(ADDRINT funcAddr)
 	g_AllocTrace.push_back(LifeElement(obj, true));
 	// prepare to match
 	g_FrameStack.push_back(obj);
+
 	g_bInStack = true;
 	
 	++ g_nTotalFrame;
+	g_nStackSize_ += nFrameSize;
+	if( g_nStackSize_ > g_nStackSize )
+		g_nStackSize = g_nStackSize_;
 }
 VOID FrameEnd(ADDRINT funcAddr)
 {   
-	//cerr <<hex << ">>" << g_hAddr2Func[funcAddr] << endl;
+	cerr <<hex << ">>" << g_hAddr2Func[funcAddr] <<  "[" << g_hFunc2StackSize[funcAddr] << endl;
 	Object *obj = g_FrameStack.back();
 	//<<debug
 	UINT32 nFrameSize = g_hFunc2StackSize[funcAddr];
@@ -271,6 +288,8 @@ VOID FrameEnd(ADDRINT funcAddr)
 	// erase the expired object
 	g_FrameStack.pop_back();
 	g_bInStack = false;
+
+	g_nStackSize_ -= nFrameSize;
 }
 VOID HeapBeginArg(UINT32 nHeapSize)
 {
@@ -293,6 +312,9 @@ VOID HeapBeginRet(ADDRINT nStartAddr)
 	g_HeapMap[nStartAddr] = obj;
 	
 	++ g_nTotalHeap;
+	g_nHeapSize_ += nHeapSize;
+	if( g_nHeapSize_ > g_nHeapSize )
+		g_nHeapSize = g_nHeapSize_;
 }
 
 VOID HeapEnd(ADDRINT nStartAddr)
@@ -302,13 +324,15 @@ VOID HeapEnd(ADDRINT nStartAddr)
 	g_AllocTrace.push_back(LifeElement(obj, false));
 	// erase expired object
 	g_HeapMap.erase(nStartAddr);
+
+	g_nHeapSize_ -= obj->_nSize;
 }
 
 VOID GlobalBegin()
 {
     // read global and static symbols via libelf and libdwarf, to fill g_GlobalTmp !!!
 	ifstream symFile;
-	symFile.open("symbol.txt");
+	symFile.open(g_szSymFile.c_str());
 	string szLine;
 	while(symFile.good())
 	{
@@ -337,6 +361,8 @@ VOID GlobalBegin()
 		g_AllocTrace.push_back(LifeElement(obj, true) );	
 		// prepare to match
 		g_GlobalMap[I->first] = obj;
+
+		g_nStaticSize += obj->_nSize;
 	}	
 	g_nTotalGlobal = g_GlobalMap.size();
 	cerr << "Read " << g_nTotalGlobal << " globals finished" << endl;
@@ -400,6 +426,9 @@ VOID StoreMulti(ADDRINT addr, UINT32 nSize)
 VOID Image(IMG img, void *v)
 {		
 	g_nEndofImage = IMG_HighAddress(img);
+	// obtain the name of symbol file
+	const std::string &szImage = IMG_Name(img);
+	g_szSymFile = szImage + ".symbol";
 	for (SEC sec = IMG_SecHead(img); SEC_Valid(sec); sec = SEC_Next(sec) )
 	{
 		for (RTN rtn = SEC_RtnHead(sec); RTN_Valid(rtn); rtn = RTN_Next(rtn) )
@@ -513,11 +542,13 @@ VOID Image(IMG img, void *v)
 			}	
 			
 			// 3.1 instrument frame allocation and deallocation
-			if( bNormal1 && bNormal2 )
+			if( bNormal1 && bNormal2
+				&& szFunc != EXCEP1 )
 			{				
 				//cerr << hex <<"=" << szFunc << ":" << INS_Disassemble(ins1) << "-" << INS_Disassemble(*ins2.begin()) << endl;
 				UINT32 nOffset = INS_OperandImmediate(ins1, 1);					         	
-				g_hFunc2StackSize[fAddr] = nOffset;	
+				g_hFunc2StackSize[fAddr] = nOffset;
+				cerr << hex << fAddr << ":\t" <<hex << nOffset << endl;	
 				
 				INS_InsertPredicatedCall(
 					ins1, IPOINT_AFTER,  (AFUNPTR) FrameBegin,
@@ -612,6 +643,8 @@ VOID Fini(int code, VOID * v)
 	g_outFile <<	"\n\n";
 	g_outFile << "Total objects count:\t" << g_nID;
 	g_outFile << "(frame: " << g_nTotalFrame<< ", heap: " << g_nTotalHeap << ", global: " << g_nTotalGlobal << ")"<< endl;
+	g_outFile << "Total objects size:\t" ;
+	g_outFile << "(frame: " << g_nStackSize<< ", heap: " << g_nHeapSize << ", global: " << g_nStaticSize << ")"<< endl;
 	g_outFile << "region\tID\tsize\tentry/exit\tnum" << endl;		
 	std::list<LifeElement>::iterator I = g_AllocTrace.begin(), E = g_AllocTrace.end();
 	for(; I != E; ++ I)
@@ -641,7 +674,7 @@ VOID Fini(int code, VOID * v)
 		if( !obj->_hOffset2W.empty() )
 			g_outFile << endl;
 	}
-	cerr << "Output finished" << endl;
+	cerr << "Output finished with image end: " << hex << g_nEndofImage << endl;
     g_outFile.close();
     std::list<Object *>::iterator o_p = g_Objects.begin(), o_e = g_Objects.end();
     for(; o_p != o_e; ++ o_p )
