@@ -49,25 +49,29 @@ END_LEGAL */
 #include <map>
 #include <sstream>
 #include <assert.h>
+#include <set>
 
-#define HEAP
-#define GLOBAL
+//#define HEAP
+//#define GLOBAL
 
-#define MALLOC "__malloc"
-#define FREE "__libc_free"
-#define EXCEP1 "__libc_malloc"
+#define USER_FUNC_ONLY 
+
+const char* c_mallocs[] = {"malloc", "__malloc", "__libc_malloc"};
+const char* c_frees[] = {"free", "__free"};
 
 
-#define MEM_WIDTH_POWER 2     // 2^n bytes. So 2 means 2^2=4bytes memory width, i.e., 32-bit
+#define MEM_WIDTH_POWER 2     // 2^n bytes. So 2 means 2^2=4 bytes memory width, i.e., 32-bit
+
 
 /* ===================================================================== */
 /* Commandline Switches */
 /* ===================================================================== */
 
 KNOB<string> KnobOutputFile(KNOB_MODE_WRITEONCE,    "pintool",
-    "o", "stack.out", "specify dcache file name");
+    "o", "trace", "specify dcache file name");
 KNOB<UINT32> KnobProfDistance(KNOB_MODE_WRITEONCE, "pintool",
-    "d","2", "profing distance power: n -> 2^n");
+    "d","4", "profing distance");
+//KNOB<string> KnobAppMode(KNOB_MODE_WRITEONCE, "pintool", "m", "ref", "ref or opti mode");
 
 
 
@@ -115,8 +119,9 @@ struct LifeElement
 	}
 };
 
-UINT32 g_nProfDistPower = 5;
+UINT32 g_nProfDist = 5;
 std::ofstream g_outFile;
+std::ofstream g_CallStackFile;
 std::string g_szSymFile;
 
 
@@ -141,7 +146,9 @@ std::list<Object *> g_Objects;   // for memory release
 std::map<ADDRINT, std::string> g_hAddr2Func; // for debug
 std::map<ADDRINT, UINT32> g_hFunc2StackSize; // map function address to stack size
 
-std::list<LifeElement> g_AllocTrace; 
+std::list<LifeElement> g_AllocTrace;     // For recording the trace
+
+std::set<string> g_userFuncs;	// for storing user functions
 
 // for stats
 UINT32 g_nTotalFrame = 0;
@@ -157,15 +164,18 @@ UINT32 g_nStaticSize = 0;
 UINT32 g_nHeapSize_ = 0;
 UINT32 g_nHeapSize = 0;
 
+UINT32 g_nDepth = 0; // the depth of frame stack
+
 /* ===================================================================== */
 /* ===================Auxiliary routines============================== */
 /* ===================================================================== */
 Object *SearchObjectByAddr(ADDRINT addr)
 {
-	if( addr < 0x4c0000 )
-		cerr << "begin of search " << hex << addr << endl;
+	//if( addr < 0x4c0000 )
+	//	cerr << "begin of search " << hex << addr << endl;
 	Object *obj = NULL;
 	bool bFound = false;	
+#ifdef GLOBAL
 	if (addr < g_nEndofImage )
 	{
 		std::map<ADDRINT, Object *>::iterator I = g_GlobalMap.begin(), E = g_GlobalMap.end();		
@@ -180,6 +190,8 @@ Object *SearchObjectByAddr(ADDRINT addr)
 		}
 	}
 	else
+#endif
+#ifdef HEAP
 	{
 		std::map<ADDRINT, Object *>::iterator I = g_HeapMap.begin(), E = g_HeapMap.end();
 		for( ; I != E; ++ I )
@@ -192,10 +204,55 @@ Object *SearchObjectByAddr(ADDRINT addr)
 			}
 		}
 	}
+#endif
 	//cerr << "end of search" << endl;
 	if( !bFound )
 		return NULL;
 	return obj;
+}
+
+bool InScope(const char **scope, string szWord, int len)
+{
+	int index = 0;	
+	bool bFound = false;
+	while(!bFound && index < len)	
+	{
+		const char *p = scope[index++];
+		if( szWord == string(p) )
+			bFound = true;
+	};
+	
+	//for debug
+	if(bFound)
+		cerr << "Found!!! " << szWord << endl;
+	return bFound;	
+}
+
+void ReadUserFuncs()
+{
+	ifstream userFuncFile;
+	userFuncFile.open("userfunc");
+	string szLine;
+	while(userFuncFile.good())
+	{
+		getline(userFuncFile, szLine);		
+		if( szLine.size() < 3)
+			continue;
+		ADDRINT id;
+		std::string szName;
+		
+		stringstream ss(szLine);
+		ss >> id >> szName;
+		//cerr << szName << hex << addr <<  size << endl;
+		g_userFuncs.insert(szName);		
+	}
+	userFuncFile.close();
+}
+
+void DumpIndent(int num, ostream &os)
+{
+	for(int i = 0; i < num; ++ i)
+		os << " ";
 }
 
 /* ===================================================================== */
@@ -253,7 +310,7 @@ VOID FrameEnd(ADDRINT iAddr )
 } */
 VOID FrameBegin(ADDRINT funcAddr)
 {	
-	cerr <<hex <<g_nID << "<<" << g_hAddr2Func[funcAddr] << "[" << g_hFunc2StackSize[funcAddr] << endl;
+	
 	// a special case: Using an extra "pop" to restore the stack
 	//if( g_hAddr2Func[funcAddr] == "malloc_hook_ini" )
 	{	
@@ -264,10 +321,18 @@ VOID FrameBegin(ADDRINT funcAddr)
 	}
 	UINT32 nFrameSize = g_hFunc2StackSize[funcAddr];	
 	Object *obj = new Object(++g_nID, nFrameSize);	
+
+	//cerr <<hex <<g_nID << "<<" << g_hAddr2Func[funcAddr] << "[" << nFrameSize << "]" << endl;
+
 	g_Objects.push_back(obj);
 	g_AllocTrace.push_back(LifeElement(obj, true));
 	// prepare to match
 	g_FrameStack.push_back(obj);
+
+	// output the call stack
+	g_CallStackFile << "<<";
+	DumpIndent(++g_nDepth, g_CallStackFile);
+	g_CallStackFile << g_hAddr2Func[funcAddr] << endl;
 
 	g_bInStack = true;
 	
@@ -278,16 +343,25 @@ VOID FrameBegin(ADDRINT funcAddr)
 }
 VOID FrameEnd(ADDRINT funcAddr)
 {   
-	cerr <<hex << ">>" << g_hAddr2Func[funcAddr] <<  "[" << g_hFunc2StackSize[funcAddr] << endl;
+	//cerr <<hex << ">>" << g_hAddr2Func[funcAddr] <<  "[" << g_hFunc2StackSize[funcAddr] << endl;
 	Object *obj = g_FrameStack.back();
 	//<<debug
 	UINT32 nFrameSize = g_hFunc2StackSize[funcAddr];
-	assert(nFrameSize == obj->_nSize);
+	if( nFrameSize != obj->_nSize )
+	{
+		cerr << hex << "The current stack top for frame IDs is:\t" << obj->_id << endl;
+		assert(nFrameSize == obj->_nSize);
+	}
 	//>>debug
 	g_AllocTrace.push_back(LifeElement(obj,false));
 	// erase the expired object
 	g_FrameStack.pop_back();
 	g_bInStack = false;
+
+	// output the call stack
+	g_CallStackFile << ">>";
+	DumpIndent(g_nDepth--, g_CallStackFile);
+	g_CallStackFile << g_hAddr2Func[funcAddr] << endl;
 
 	g_nStackSize_ -= nFrameSize;
 }
@@ -422,6 +496,12 @@ VOID StoreMulti(ADDRINT addr, UINT32 nSize)
 	for( UINT32 i = alignedOff1; i <= alignedOff2; ++ i)
 		++ obj->_hOffset2W[i];	
 }
+
+VOID FuncInvoke(ADDRINT nStartAddr)
+{
+	std::string szFunc = g_hAddr2Func[nStartAddr];
+	//cerr << "Calling " << szFunc << "------" << endl;
+}
 /* ===================================================================== */
 VOID Image(IMG img, void *v)
 {		
@@ -446,7 +526,7 @@ VOID Image(IMG img, void *v)
 			//					IARG_END);
 			//1. Instrument malloc/free functions for heap objects
 #ifdef HEAP
-			if( RTN_Name(rtn) == MALLOC )
+			if( InScope(c_mallocs, szFunc, 3) )
 			{				
 				RTN_InsertCall(rtn, IPOINT_BEFORE, (AFUNPTR) HeapBeginArg,
 								//IARG_THREAD_ID,
@@ -457,7 +537,7 @@ VOID Image(IMG img, void *v)
 								IARG_FUNCRET_EXITPOINT_VALUE, 
 								IARG_END);				
 			}
-			else if( RTN_Name(rtn) == FREE )
+			else if( InScope(c_frees, szFunc, 2) )
 			{
 				RTN_InsertCall(rtn, IPOINT_BEFORE, (AFUNPTR) HeapEnd,
 								IARG_FUNCARG_ENTRYPOINT_VALUE, 0,
@@ -473,6 +553,13 @@ VOID Image(IMG img, void *v)
 								IARG_END);
 				RTN_InsertCall(rtn, IPOINT_AFTER, (AFUNPTR) GlobalEnd,
 								IARG_END);				
+			}
+#endif
+#ifdef	USER_FUNC_ONLY
+			if( g_userFuncs.find(szFunc) == g_userFuncs.end() )
+			{
+				RTN_Close(rtn);
+				continue;
 			}
 #endif
 			//2. Search each function for stack size
@@ -543,12 +630,12 @@ VOID Image(IMG img, void *v)
 			
 			// 3.1 instrument frame allocation and deallocation
 			if( bNormal1 && bNormal2
-				&& szFunc != EXCEP1 )
+				&& !InScope(c_mallocs, szFunc, 3) )
 			{				
 				//cerr << hex <<"=" << szFunc << ":" << INS_Disassemble(ins1) << "-" << INS_Disassemble(*ins2.begin()) << endl;
 				UINT32 nOffset = INS_OperandImmediate(ins1, 1);					         	
 				g_hFunc2StackSize[fAddr] = nOffset;
-				cerr << hex << fAddr << ":\t" <<hex << nOffset << endl;	
+				//cerr << hex << fAddr << ":\t" <<hex << nOffset << endl;	
 				
 				INS_InsertPredicatedCall(
 					ins1, IPOINT_AFTER,  (AFUNPTR) FrameBegin,
@@ -566,13 +653,19 @@ VOID Image(IMG img, void *v)
 						IARG_END); 					
 				}
 			}
+			// for hacking internal name of malloc/free
+			RTN_InsertCall(rtn, IPOINT_BEFORE, (AFUNPTR)FuncInvoke,
+				IARG_ADDRINT, fAddr,			
+				IARG_END);
+
 			RTN_Close(rtn);
 			// ignoring function stacks without "sub esp, 0x4", which appears for small library functions, like _start, etc
 			// the skip is somehow reasonable, since these frames are small and not write-intensive
 			if( !bNormal1 || !bNormal2)	
 				continue;
-			RTN_Open(rtn);
+
 			// 4. to instrument write operations, only considering function with normal stack
+			RTN_Open(rtn);			
 			for(INS ins = RTN_InsHead(rtn); INS_Valid(ins); ins = INS_Next(ins) )
 			{				
 				if ( INS_IsStackWrite(ins) )
@@ -628,24 +721,25 @@ VOID Image(IMG img, void *v)
 
 VOID Fini(int code, VOID * v)
 {
-    g_nProfDistPower = KnobProfDistance.Value();
-	char buf[256];
-    sprintf(buf, "%u",g_nProfDistPower);
-    string szOutFile = KnobOutputFile.Value() +"_" + buf;
+    //g_nProfDist = KnobProfDistance.Value();
+    //char buf[256];
+    //sprintf(buf, "%u",g_nProfDist);
+    //string szOutFile = KnobOutputFile.Value() +"_" + buf + "_" + KnobAppMode.Value();
+	string szOutFile = KnobOutputFile.Value();
 
     g_outFile.open(szOutFile.c_str());
-    g_outFile << "PIN:MEMLATENCIES 1.0. 0x0\n";
-            
-    g_outFile <<
+    g_outFile << "PIN:MEMLATENCIES 1.0. 0x0\n"
         "#\n"
         "# Write stats with distance size:\t";
-	g_outFile << (1<<g_nProfDistPower);
+	g_outFile << dec << (g_nProfDist);
 	g_outFile <<	"\n\n";
 	g_outFile << "Total objects count:\t" << g_nID;
 	g_outFile << "(frame: " << g_nTotalFrame<< ", heap: " << g_nTotalHeap << ", global: " << g_nTotalGlobal << ")"<< endl;
 	g_outFile << "Total objects size:\t" ;
 	g_outFile << "(frame: " << g_nStackSize<< ", heap: " << g_nHeapSize << ", global: " << g_nStaticSize << ")"<< endl;
-	g_outFile << "region\tID\tsize\tentry/exit\tnum" << endl;		
+	cerr << dec << "Objects Count:\t(frame: " << g_nTotalFrame<< ", heap: " << g_nTotalHeap << ", global: " << g_nTotalGlobal << ")"<< endl;
+	cerr <<dec << "Region Size:\t(frame: " << g_nStackSize<< ", heap: " << g_nHeapSize << ", global: " << g_nStaticSize << ")"<< endl;
+	g_outFile << hex << "region\tID\tsize\tentry/exit\tnum" << endl;		
 	std::list<LifeElement>::iterator I = g_AllocTrace.begin(), E = g_AllocTrace.end();
 	for(; I != E; ++ I)
 	{
@@ -679,6 +773,8 @@ VOID Fini(int code, VOID * v)
     std::list<Object *>::iterator o_p = g_Objects.begin(), o_e = g_Objects.end();
     for(; o_p != o_e; ++ o_p )
     	delete *o_p;
+
+	g_CallStackFile.close();
 }
 
 /* ===================================================================== */
@@ -696,7 +792,11 @@ int main(int argc, char *argv[])
     
 	IMG_AddInstrumentFunction(Image, 0);
 
-    PIN_AddFiniFunction(Fini, 0);
+   	 PIN_AddFiniFunction(Fini, 0);
+
+	ReadUserFuncs();
+	g_CallStackFile.open("stack");
+	
 
     // Never returns	
     PIN_StartProgram();
